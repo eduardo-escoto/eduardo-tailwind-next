@@ -1,0 +1,99 @@
+---
+title: 'eduardo.wtf'
+date: '2021-08-23'
+summary: 'I had been wanting to finish my portfolio website for a while. I finally got the incentive to push through and just do it. Thus, I trashed what I had, and began anew from scratch. Embarked on a journey to learning to love Bootstrap after all these years.'
+tags: ['test']
+frontPage: true
+featuredImage: '/images/edlogoFinal_circle_clipped_thick.png'
+githubUri: 'https://github.com/eduardo-exists/eduardo.wtf'
+---
+
+I have been toying around with the idea of making a website for my portfolio and if I ever get around to it, my blog. Naturally, due to that dynamic aspect, some kind of static site generator is the best choice! As someone who greatly enjoys React and ES6, Gatsby was the best option for me. After finally going for it, I am very happy with my development experience.
+
+The process of building a Gatsby site is immensly painless. I had expected so much worse, but it feels just like building any React Webapp with a GraphQL data layer. Its a very natural extension react, and I'll definitey be building more sites with it soon.
+
+In terms of content creation, its also very user friendly. I have set my configuration up to work off of MDX files, which are a modified version of markdown which allow JSX embedding. This means that I can further componentize my code and even use any components I create in my markdown.
+
+Past that, the way that I can dynamically update the front page with projects and subsequently any new additions like blogs or maybe talks/papers.
+
+For example, on the front page, we query the GraphQL layer to get my markdown files and their frontmatter.
+
+```jsx
+export const query = graphql`
+  query {
+    allMdx(
+      sort: { order: [DESC, DESC], fields: [frontmatter___frontPage, frontmatter___date] }
+      limit: 6
+    ) {
+      nodes {
+        frontmatter {
+          title
+          date
+          description
+          githubUri
+          featuredImage {
+            childImageSharp {
+              gatsbyImageData(layout: CONSTRAINED, width: 1200)
+            }
+          }
+        }
+        timeToRead
+        slug
+      }
+    }
+  }
+`
+```
+
+Which gives us a maximum of 6 projects, ordered by a boolean which indicates a frontPage priority, and then ordered by date. In this way, I can dynamically keep the most fresh projects being featured, but also be able to control some kind of priority.
+
+Then I define a card component:
+
+```jsx
+const ProjectCard = ({ frontmatter, timeToRead, slug }) => (
+  <div class="col">
+    <div class="card shadow-sm">
+      <GatsbyImage
+        class="bd-placeholder-img card-img-top"
+        width="100%"
+        height="230"
+        role="img"
+        aria-label="Placeholder: Thumbnail"
+        // fluid={frontmatter.featuredImage.childImageSharp.fluid}
+        image={frontmatter.featuredImage.childImageSharp.gatsbyImageData}
+      />
+      <div class="card-body">
+        <h5 class="card-title">{frontmatter.title}</h5>
+        <p class="card-text">{frontmatter.description}</p>
+        <div class="d-flex justify-content-between align-items-center">
+          <div class="btn-group">
+            <Link to={'projects/' + slug} class="btn btn-sm btn-outline-secondary">
+              Read More
+            </Link>
+            <a
+              href={frontmatter.githubUri}
+              class="btn btn-sm btn-outline-secondary"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Project Repo <FontAwesomeIcon icon={faGithub} />
+            </a>
+          </div>
+          <small class="text-muted">
+            {timeToRead}
+            {timeToRead > 1 ? ' mins' : ' min'}
+          </small>
+        </div>
+      </div>
+    </div>
+  </div>
+)
+```
+
+Of which, each Markdown node from the Graphql Query is mapped into a ProjectCard like so:
+
+```jsx
+data.allMdx.nodes.map((nodeData) => <ProjectCard {...nodeData} />)
+```
+
+Having the flexibility to react dynamically from React, is such a boon to web development!

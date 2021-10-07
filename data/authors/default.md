@@ -6,7 +6,7 @@ company: Afiniti
 email: me@eduardo.wtf
 twitter: https://twitter.com/Twitter
 linkedin: https://www.linkedin.com
-github: https://github.com
+github: https://github.com/eduardo-exists
 ---
 
 Hey there! I&apos;m Ed :) I am a Data Scientist at

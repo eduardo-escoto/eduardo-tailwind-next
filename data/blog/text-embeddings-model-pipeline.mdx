@@ -1,0 +1,232 @@
+---
+title: 'Text Embeddings Recurrent Neural Network Pipeline'
+date: '2021-07-20'
+summary: 'An end to end modeling pipeline implementation of a Recurrent Neural Network tha learns word embeddings and outputs a continuous prediction. Trains, Validates, and Predicts automatically.'
+tags: ['test']
+# githubUri: "https://github.com/eduardo-exists/text-embeddings-model-pipeline"
+---
+
+This project contains a complete model pipeline that is ready to deploy -- after some configuration of course. It reads in data from a data source at the time of training or prediction, and then outputs those predictions to a destination table. Additionally, it will bulk predict based on the number of days given in the configuration files, and only re-train after a specified number of days. This design hinges on it being schedule to run, once a day, and perform a set of bulk predictions, and is not focused around real-time predictions.
+
+## The Model
+
+This model was designed to intake multiple text sources that can have varying semantic meanings, learning word embeddings for each source. A word embedding is a numerical representations of a word. These can be learned in context to a target variable. In addition to text sources, Categorical and Numerical data are also handled, and make up a side branch of the Neural Network. Below, is a diagram of the model. In this specific model graph, there are two text sources. In practice, there can be an arbitrary amount of them.
+
+<img alt="Model" width={500} height={500} layout="responsive" src="/images/model.png" />
+
+Another key facet of this model, is the recurrent aspect which is handled by the GRU layers. GRU's are useful for learning longer sequences, as they learn what information to keep, and what to forget as the sequence is unrolled through time.
+
+The text branches are then added based on how many text sources are present in the configuration file, and are functionally added to the model at build time. This can be seen in the `build_nlp_model` method.
+
+```python
+def build_nlp_model(train_shape, nlp_len, params):
+    inp_feats = Input(shape = (train_shape,))
+    inp_tknzd = lambda: Input(shape = (params['max_length'], ))
+
+    model = (Dense(2**(params['n_layers'] + 2), activation = params['activation']))(inp_feats)
+    model = (Dropout(params['dropout']))(model)
+
+    for layer_num in np.flip(np.arange(2, params['n_layers'] + 1)):
+        layer_size = 2**(layer_num + 1)
+        model = (Dense(layer_size, activation = params['activation']))(model)
+        if layer_size > 100:
+            model = (Dropout(params['dropout']))(model)
+
+    models = [model]
+
+    # Building as many text models as there are in nlp seqs
+    text_inputs = [inp_tknzd() for n in range(nlp_len)]
+    text_models = [build_text_model(inp, params) for inp in text_inputs]
+
+    model = concatenate(models + text_models)
+    model = (Dense(1, activation=params['output_activation']))(model)
+    model = Model(inputs = [inp_feats] + text_inputs, outputs = model)
+
+    optimizer = None
+    if params['optimizer'] =='SGD':
+        optimizer=SGD(learning_rate=params['learning_rate'])
+    elif params['optimizer'] =='Adam':
+        optimizer=Adam(learning_rate=params['learning_rate'])
+    elif params['optimizer'] =='RMSprop':
+        optimizer=RMSprop(learning_rate=params['learning_rate'])
+    elif params['optimizer'] =='Adagrad':
+        optimizer=Adagrad(learning_rate=params['learning_rate'])
+    elif params['optimizer'] =='Adamax':
+        optimizer=Adamax(learning_rate=params['learning_rate'])
+    elif params['optimizer'] =='Nadam':
+        optimizer=Nadam(learning_rate=params['learning_rate'])
+
+    model.compile(loss='mean_squared_error', optimizer=optimizer, metrics=['mse'])
+
+    return model
+```
+
+Specifically, you can see a list comprehensions of text inputs being created as `text_inputs = [inp_tknzd() for n in range(nlp_len)]`. Which then each gets passed into the function that builds the text model.
+
+```python
+def build_text_model(inp, params):
+    text_model = (Embedding(params['max_words'], params['embedding_dim'], input_length = params['max_length']))(inp)
+
+    for layer_num in np.arange(0, params['n_layers_gru']):
+        layer_size = int(params['embedding_dim'] / (2**layer_num))
+        text_model = (GRU(layer_size,
+                          return_sequences = not (layer_num == (params['n_layers_gru'] - 1))))(text_model)
+
+    text_model = (Dense(8, activation = params['activation']))(text_model)
+
+    return text_model
+```
+
+This is the best part about the functional API of Tensorflow, its very easy to make complex model structures. The class based API is one I have yet to explore, but similar complexity could be obtained as well, you just lose the ability to get a model summary.
+
+## The Process:
+
+1. Reads in data from a specified SQL Table for a date range relative to the current date, depending on if it is training, or predicting.
+2. Processes the data. In a high overview, this involves splitting the data into Training/Validation sets, then splitting into Numerical, Categorical, and Text data. After splitting, each type of data is handled in a way appropriate to that type. If training, any scalers, encoders, etc are serialized to a pickle file for usage in later runs for predictions only. Details on how each is handled, will be discussed in more depth :)
+3. The processed text data is then Tokenized and word sequences are created.
+4. If training a new model, a model is built, and then subsequently trained, and saved. If predicting, the previous model trained will be read into memory.
+5. Finally, predictions are generated, and attached by index to the dataframe, and finally output to a destination SQL Table.
+
+## Data Processing
+
+Each column from the SQL data source is specified as a type of data, namely, Numerical, Categorical, or Text. These are each handled differently in the Processing step. This can be seen in the configuration files as below.
+
+```yaml
+categoric_features:
+  - 'categoric_feature'
+
+nlp_features:
+  - 'text_feature_1'
+  - 'text_feature_2'
+
+numeric_features:
+  - 'numeric_feature_1'
+  - 'numeric_feature_2'
+```
+
+### Numerical Data
+
+Numerical data is processed in the following way:
+
+1. Missing Values and NA values replaced with `np.nan`.
+2. For each column in Numerical Data, each is cast to a floating point number. Currently a 32-bit number, but 16-bit or 8-bit could also be if memory was a concern.
+3. Then the `np.nan` values are imputed with the Mode of the column from the Training Data and the mode is saved in a pick file for the column, for use later when processing prediction data.
+4. A Standard Scaler is fit on the Training Data, and then the Training and Validation Data are fit by the scaler. Scaler is saved for later in a pickle for use with Prediction Data.
+
+```python
+def process_num(num, params, model_path):
+    sc = StandardScaler()
+
+    num = num.replace('NA', np.nan)
+    num = num.replace('', np.nan)
+
+    for col in num.columns:
+        if col != params['date_feature']:
+            try:
+                num[col] = num[col].astype(np.float32)
+                mode = num[col].mode()[0]
+                num[col] = num[col].fillna(mode)
+                with open(model_path + '/imputers/mode_' + col +'.pickle', 'wb') as handle:
+                    pickle.dump(mode, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+            except:
+                num.drop([col], axis = 1, inplace = True)
+                print('{} dropped!'.format(col))
+
+
+    num_train, num_val, num_test = split_by_date(num, params)
+    num_cols = num_train.columns
+
+    sc.fit(num_train)
+
+    df_train_num = sc.transform(num_train)
+    df_val_num = sc.transform(num_val)
+    df_test_num = sc.transform(num_test)
+
+    df_train_num = pd.DataFrame(df_train_num, columns = num_cols, index = num_train.index)
+    df_val_num = pd.DataFrame(df_val_num, columns = num_cols, index = num_val.index)
+    df_test_num = pd.DataFrame(df_test_num, columns = num_cols, index = num_test.index)
+
+    with open(model_path + '/scalers/standard_scaler.pickle', 'wb') as handle:
+        pickle.dump(sc, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+    return df_train_num, df_val_num, df_test_num
+```
+
+### Categorical Data
+
+Categorical data is handled similarly to above, except we first find the non-rare categories in each column by volume.
+
+```python
+def find_non_rare_labels(df, variable, tolerance):
+    temp = df.groupby([variable])[variable].count() / len(df)
+    non_rare = [x for x in temp.loc[temp>tolerance].index.values]
+    return non_rare
+```
+
+Any value of the column which is not greater then the smalls tolerance, will be encoded as smalls. Then we impute, and also encode using a One Hot Encoder. Smalls are then appended to each column of the fit encoder in case there is a new category that was not seen in the training data.
+
+```python
+
+def process_cat(cat, params, model_path):
+    ohe = OneHotEncoder(sparse = False)
+
+    cat = cat.replace('NA', np.nan)
+    cat = cat.replace('', np.nan)
+    cat = cat.replace(np.nan, 'NL')
+
+    for col in cat.columns:
+        if col != params['date_feature']:
+            frequent_cat = find_non_rare_labels(cat, col, params['smalls'])
+            cat[col] = np.where(cat[col].isin(frequent_cat), cat[col], 'smalls')
+
+            with open(model_path + '/imputers/smalls_' + col +'.pickle', 'wb') as handle:
+                pickle.dump(frequent_cat, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    cat_train, cat_val, cat_test = split_by_date(cat, params)
+    cat_cols = cat_train.columns
+
+    ohe.fit(cat_train)
+    ohe.categories_ =  [append_smalls(cat) for cat in ohe.categories_]
+
+    ohe_cols = ohe.get_feature_names(cat_cols.values)
+
+    df_train_cat = ohe.transform(cat_train.values)
+    df_val_cat = ohe.transform(cat_val.values)
+    df_test_cat = ohe.transform(cat_test.values)
+
+    df_train_cat = pd.DataFrame(df_train_cat, columns = ohe_cols, index = cat_train.index)
+    df_val_cat = pd.DataFrame(df_val_cat, columns = ohe_cols, index = cat_val.index)
+    df_test_cat = pd.DataFrame(df_test_cat, columns = ohe_cols, index = cat_test.index)
+
+    with open(model_path + '/encoders/one_hot_encoder.pickle', 'wb') as handle:
+        pickle.dump(ohe, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    return df_train_cat, df_val_cat, df_test_cat
+```
+
+### Text Data
+
+For text, we process it a bit differently. I use the nltk package for convenience.
+
+1. Clean out Junk characters with a regex cleaner.
+2. Remove stop words.
+3. Stem each word.
+4. Filter any empty whitespace.
+5. Tokenize and build sequences.
+
+```python
+def clean_text(text_input):
+    cleaner = RegexpTokenizer(r'\w+')
+    stop_words = stopwords.words('english')
+    stemmer = PorterStemmer()
+    text = [x.lower().strip() for x in text_input]
+    tokenized = [word_tokenize(x) for x in text]
+    tokenized = [(filter(None, x)) for x in tokenized]
+    cleaned_tokenized = [cleaner.tokenize(" ".join(x)) for x in tokenized]
+    filtered_tokenized = [[s for s in x if s not in stop_words] for x in cleaned_tokenized]
+    sentences = [" ".join(row) for row in filtered_tokenized]
+
+    return pd.Series(data = sentences, index = text_input.index)
+```

@@ -1,0 +1,54 @@
+---
+title: 'Tree Dataframe Leaf Value Propogation'
+date: '2021-05-15'
+summary: 'In a very niche use case where RPart Decision trees are converted to dataframes, propogating values up the leaf nodes proved to be difficult. I wrote a neat algorithm that self-joins the tree dataframe such that it propogates values all the way to the root.'
+tags: ['test']
+frontPage: true
+featuredImage: '/images/decision_trees_sq.png'
+githubUri: 'https://gist.github.com/eduardo-exists/31906e24d283d537844b6a1ee09bfb83'
+---
+
+This project revolves around a very niche situation which arose in my work. The short version is that we build a binary decision tree using RPart in R in order to split our data into hierarchical groups. These groups have a specific meaning, so the tree is saved into a DataFrame with the number of records in each tree being saved in the leaf nodes. Each leaf node has some information about the group in that node. The key problem to solve, is how to get these values, propogated up from the leaf nodes, to also exists in the intermediate splits.
+
+What this ends up looking like, is a Dataframe with as many rows as there are splits. The issue then is that performing any kind of traditional tree-based traversal is a pain. A tree data structure is not provided, so I needed to be creative in how to populate these.
+
+Initially, I made an attempt to build a tree data structure and use that. However, halfway into doing that, I thought -- There has to be an easier way, I should be able to use what I'm given to do this properly -- and finally I decided to use some key features of tabular data.
+
+Namely, the key features to use, are Group By and Joins! By Joining the Tree DataFrame to itself on the split indices, we can aggregate and take the sums at each step to push those values up the tree.
+
+Notice below, that the iterative condition is once all of the counts are populated.
+
+```r
+# We can calculate all of the proper sizes
+# by re-joining on child indices
+# until the sizes propogate until the top.
+while(tree_struct[is.na(counts), .N] != 0){
+    # Joining back children
+    tree_struct = merge(tree_struct,
+        tree_struct[, .(split_int, left_child_counts = counts)],
+        all.x = T, by.x = "left_child_id", by.y = "split_int"
+    )
+
+    tree_struct = merge(
+        tree_struct,
+        tree_struct[, .(split_int, right_child_counts = counts)],
+        all.x = T, by.x = "right_child_id", by.y = "split_int"
+    )
+
+    # Adding the rows where both
+    # children were able to be populated
+    tree_struct[
+        !is.na(left_child_counts) &
+        !is.na(right_child_counts) &
+        is.na(counts),
+        counts := left_child_counts + right_child_counts
+    ]
+    tree_struct[,
+    `:=` (left_child_counts = NULL, right_child_counts = NULL)
+    ]
+}
+```
+
+It is the case that given that the tree is complete, that it will always converge to a fully populated tree. I am too lazy to write out a proof, so trust me on this.
+
+I'm pretty proud of this, as it feels like a bit of a clever approach to this very specific problem, which I'm not sure arises alot.
